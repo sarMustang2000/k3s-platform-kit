@@ -1,0 +1,5 @@
+image: {repository: ghcr.io/example/api, tag: 3f2a1c9}
+command: [celery, -A, config, worker, --loglevel=info]
+containerPort: 0
+envFromSecrets: [api-secrets]
+replicaCount: 2

@@ -1,0 +1,35 @@
+---
+# Monitoring for every tenant of the node, not just one app: all namespaces,
+# the host itself and the Docker containers beside k3s.
+#
+# One upstream chart, victoria-metrics-k8s-stack, pinned: VictoriaMetrics for
+# metrics, VictoriaLogs for logs, vmalert + Alertmanager for alerting, Grafana
+# with its dashboards, node-exporter and kube-state-metrics. VictoriaMetrics
+# rather than Prometheus because disk is the binding constraint on this box and
+# VM stores the same series in a fraction of the space.
+
+monitoring_namespace: monitoring
+monitoring_release: monitoring
+
+monitoring_chart_repo: https://victoriametrics.github.io/helm-charts/
+monitoring_chart_version: 0.96.0
+
+# How long, and how much disk. Both stores sit on the same filesystem as every
+# other tenant's database, so each is capped by size as well as by time.
+monitoring_metrics_retention: 30d
+monitoring_metrics_storage: 30Gi
+monitoring_logs_retention: 14d
+monitoring_logs_storage: 30Gi
+# VictoriaLogs deletes the oldest days first once this is reached, whatever the
+# retention says. Kept below the PVC size so the volume itself never fills.
+monitoring_logs_max_disk: 25GiB
+
+# Grafana is reached through the edge nginx at monitoring_hostname, which
+# proxies to this NodePort over loopback.
+monitoring_grafana_nodeport: 30090
+
+# No cAdvisor for the Docker containers beside k3s.
+# cAdvisor v0.52 cannot read Docker's containerd image store ("failed to
+# identify the read-write layer ID"): it exported nothing for them while
+# burning ~1.2 CPU retrying, and its errors tripped TooManyLogs. Revisit with a
+# cAdvisor release that supports the containerd snapshotter.

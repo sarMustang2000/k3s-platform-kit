@@ -1,0 +1,17 @@
+---
+# Existing clusters are left alone unless this is true (then only +1 minor version upgrades are allowed).
+k3s_allow_upgrade: false
+# Components disabled at install. nginx (NodePort 30080) is the entry point, so Traefik is not needed;
+# set to [] if your cluster uses Traefik for Ingress resources.
+k3s_disable_components: [traefik]
+# Anything else for `k3s server` (e.g. "--cluster-cidr 10.42.0.0/16 --secrets-encryption").
+k3s_extra_server_args: ""
+# CI runner IPs are allowed to reach the Kubernetes API (for `helm upgrade` in CI).
+k3s_runner_ips: "{{ groups['ci_runner'] | default([]) | map('extract', hostvars, 'ansible_host') | list }}"
+
+# hostPath directories the apps mount (relative to k3s_hostpath_root). Give an
+# owner when the container runs as a non-root uid, e.g. node images (uid 1000)
+# that write uploads:
+#   - {path: api/media}
+#   - {path: cms/uploads, owner: "1000"}
+k3s_hostpaths: []

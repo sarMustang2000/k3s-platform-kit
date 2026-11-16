@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Restore a database:  gunzip -c <file>.sql.gz | mysql <database>
+# Restore uploads:     tar -xzf <file>.tar.gz -C /
+set -euo pipefail
+
+DEST="{{ backups_dir }}"
+STAMP=$(date +%Y%m%d-%H%M)
+mkdir -p "$DEST"
+
+{% if 'mysql' in group_names %}
+# MySQL (root via unix socket; --single-transaction = consistent InnoDB snapshot without locking)
+{% for db in backups_mysql_databases %}
+mysqldump --single-transaction --routines --triggers --set-gtid-purged=OFF "{{ db }}" | gzip > "$DEST/{{ db }}-$STAMP.sql.gz"
+{% endfor %}
+{% endif %}
+
+{% if 'k3s_server' in group_names and backups_paths %}
+# User uploads (hostPath volumes)
+tar -czf "$DEST/uploads-$STAMP.tar.gz" -C / \
+{% for path in backups_paths %}
+  "{{ path | regex_replace('^/', '') }}"{{ ' \\' if not loop.last else '' }}
+{% endfor %}
+{% endif %}
+
+{% if backups_rsync_target %}
+# Off-site copy
+rsync -a "$DEST/" "{{ backups_rsync_target }}"
+{% endif %}
+
+find "$DEST" -type f -mtime +{{ backups_retention_days }} -delete
+echo "$(date -Is) backup ok"

@@ -1,0 +1,61 @@
+# Least-privilege identity for CI: `helm upgrade --install` of the platform
+# chart in the namespaces it is bound to, and nothing else. Use its kubeconfig
+# (k8s/make-ci-kubeconfig.sh) as KUBE_CONFIG instead of a cluster-admin one,
+# so a leaked CI secret cannot touch kube-system or other tenants.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: kube-system
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ci-deployer-token
+  namespace: kube-system
+  annotations:
+    kubernetes.io/service-account.name: ci-deployer
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-deployer
+rules:
+  # Everything helm/app renders, plus Helm's release records (Secrets).
+  - apiGroups: [""]
+    resources: [services, configmaps, secrets, persistentvolumeclaims, serviceaccounts, pods, pods/log, events]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [cronjobs, jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [autoscaling]
+    resources: [horizontalpodautoscalers]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [policy]
+    resources: [poddisruptionbudgets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+# A ClusterRole granted through a RoleBinding is limited to that namespace.
+# One RoleBinding per namespace CI may deploy to.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer
+  namespace: api
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: platform-deployer}
+subjects: [{kind: ServiceAccount, name: ci-deployer, namespace: kube-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer
+  namespace: staging
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: platform-deployer}
+subjects: [{kind: ServiceAccount, name: ci-deployer, namespace: kube-system}]

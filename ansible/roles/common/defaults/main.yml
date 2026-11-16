@@ -1,0 +1,10 @@
+---
+# SSH port opened in UFW (must be the port you connect on, or enabling the firewall locks you out).
+common_ssh_port: "{{ ansible_port | default(22) }}"
+common_harden_ssh: true
+common_sysctl:
+  fs.inotify.max_user_watches: 524288
+  fs.inotify.max_user_instances: 1024
+  fs.file-max: 2097152
+  net.core.somaxconn: 4096
+  vm.max_map_count: 262144

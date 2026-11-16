@@ -1,0 +1,5 @@
+---
+# nginx on this host may serve other products too; never reload a config that does not parse.
+- name: Reload nginx
+  ansible.builtin.shell: nginx -t && systemctl reload nginx
+  changed_when: true

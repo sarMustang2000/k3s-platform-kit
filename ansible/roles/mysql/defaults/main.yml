@@ -1,0 +1,13 @@
+---
+# Database name == user name; one per app and environment (group_vars platform_databases).
+mysql_databases: "{{ platform_databases }}"
+mysql_same_host_as_k3s: "{{ hostvars[groups['k3s_server'][0]]['ansible_host'] == ansible_host }}"
+# Source addresses the app pods appear to come from (DB_HOST is mysql_host_ip, see group_vars/all/main.yml).
+# MySQL on another machine: pods are SNATed to the k3s node's address -> grant that address only.
+# MySQL on the k3s node itself: pods reach it through the node's own address, and flannel may or may not
+# masquerade that traffic, so allow both the pod network and the node address.
+mysql_client_hosts: >-
+  {{ ['10.42.%', k3s_node_ip] if mysql_same_host_as_k3s | bool else [k3s_node_ip] }}
+mysql_client_cidrs: >-
+  {{ ['10.42.0.0/16', k3s_node_ip] if mysql_same_host_as_k3s | bool else [k3s_node_ip] }}
+mysql_require_tls: false

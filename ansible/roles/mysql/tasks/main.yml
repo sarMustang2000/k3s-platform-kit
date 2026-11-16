@@ -1,0 +1,61 @@
+---
+# MySQL 8 with one database + user per app and environment, reachable only from the k3s node.
+- name: Install MySQL server and the Python driver Ansible needs
+  ansible.builtin.apt:
+    name: [mysql-server, python3-pymysql]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Ubuntu ships mysql.conf.d/mysqld.cnf with "bind-address = 127.0.0.1". MySQL reads !includedir
+# files in alphabetical order and the last value wins, so this file must sort AFTER mysqld.cnf -
+# a numeric prefix (90-) is read first and silently loses, leaving MySQL on loopback only.
+- name: Remove the old config that sorted before Ubuntu's mysqld.cnf
+  ansible.builtin.file:
+    path: /etc/mysql/mysql.conf.d/90-platform.cnf
+    state: absent
+  notify: Restart mysql
+
+- name: MySQL tuning and network settings
+  ansible.builtin.template:
+    src: platform.cnf.j2
+    dest: /etc/mysql/mysql.conf.d/zz-platform.cnf
+    mode: "0644"
+  notify: Restart mysql
+
+- name: Start MySQL
+  ansible.builtin.service:
+    name: mysql
+    state: started
+    enabled: true
+
+- name: Apply config changes before creating users
+  ansible.builtin.meta: flush_handlers
+
+- name: Create databases
+  ansible.mysql.mysql_db:
+    name: "{{ item }}"
+    encoding: utf8mb4
+    collation: utf8mb4_unicode_ci
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  loop: "{{ mysql_databases }}"
+
+- name: Create one user per database, allowed only from the k3s node / pod network
+  ansible.mysql.mysql_user:
+    name: "{{ item.0 }}"
+    host: "{{ item.1 }}"
+    password: "{{ vault_mysql_passwords[item.0] }}"
+    priv: "{{ item.0 }}.*:ALL"
+    state: present
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+  loop: "{{ mysql_databases | product(mysql_client_hosts) | list }}"
+  no_log: true
+
+- name: Firewall - MySQL from the k3s node / pod network only
+  community.general.ufw:
+    rule: allow
+    port: "3306"
+    proto: tcp
+    from_ip: "{{ item }}"
+  loop: "{{ mysql_client_cidrs }}"

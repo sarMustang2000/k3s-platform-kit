@@ -1,0 +1,98 @@
+# GitLab CI version of the same gate. In a service repository:
+#
+#   include:
+#     - remote: https://raw.githubusercontent.com/<owner>/k3s-platform-kit/main/ci/gitlab/security.gitlab-ci.yml
+#   variables:
+#     SCAN_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+#
+# Findings are published as GitLab security reports where the format allows,
+# and every job fails the pipeline on HIGH/CRITICAL.
+
+variables:
+  SCAN_SEVERITY: HIGH,CRITICAL
+  TRIVY_IMAGE: aquasec/trivy:0.57.1
+
+stages: [build, security, sign, deploy]
+
+security:secrets:
+  stage: security
+  image: {name: "ghcr.io/gitleaks/gitleaks:v8.21.2", entrypoint: [""]}
+  variables: {GIT_DEPTH: 0}
+  script:
+    - gitleaks git . --redact --verbose --report-format json --report-path gl-secret-detection-report.json
+  artifacts:
+    when: always
+    paths: [gl-secret-detection-report.json]
+
+security:sast:
+  stage: security
+  image: semgrep/semgrep:1.97.0
+  script:
+    - semgrep scan --config p/default --gitlab-sast --output gl-sast-report.json --error --severity ERROR
+  artifacts:
+    when: always
+    reports: {sast: gl-sast-report.json}
+
+security:dependencies:
+  stage: security
+  image: {name: $TRIVY_IMAGE, entrypoint: [""]}
+  script:
+    - trivy fs --scanners vuln --severity $SCAN_SEVERITY --ignore-unfixed --exit-code 1
+        --format template --template "@/contrib/gitlab.tpl" --output gl-dependency-scanning-report.json .
+  artifacts:
+    when: always
+    reports: {dependency_scanning: gl-dependency-scanning-report.json}
+
+security:iac:
+  stage: security
+  image: {name: $TRIVY_IMAGE, entrypoint: [""]}
+  script:
+    - trivy config --severity $SCAN_SEVERITY --exit-code 1 .
+
+security:image:
+  stage: security
+  image: {name: $TRIVY_IMAGE, entrypoint: [""]}
+  rules:
+    - if: $SCAN_IMAGE
+  variables:
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
+  script:
+    - trivy image --severity $SCAN_SEVERITY --ignore-unfixed --exit-code 1
+        --format template --template "@/contrib/gitlab.tpl" --output gl-container-scanning-report.json "$SCAN_IMAGE"
+    - trivy image --format cyclonedx --output sbom.cdx.json "$SCAN_IMAGE"
+  artifacts:
+    when: always
+    reports:
+      container_scanning: gl-container-scanning-report.json
+      cyclonedx: sbom.cdx.json
+
+# Keyless signing with GitLab's OIDC identity token.
+sign:image:
+  stage: sign
+  image: {name: "gcr.io/projectsigstore/cosign:v2.4.1", entrypoint: [""]}
+  rules:
+    - if: $SCAN_IMAGE && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  id_tokens:
+    SIGSTORE_ID_TOKEN: {aud: sigstore}
+  script:
+    - cosign login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - cosign sign --yes "$SCAN_IMAGE"
+
+# Extend in the service repository:
+#   deploy:production:
+#     extends: .helm-deploy
+#     variables: {RELEASE: api, NAMESPACE: api, VALUES_FILE: deploy/production.yaml}
+#     environment: production
+.helm-deploy:
+  stage: deploy
+  image: {name: "alpine/helm:3.16.3", entrypoint: [""]}
+  resource_group: $CI_ENVIRONMENT_NAME   # one rollout per environment at a time
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - install -m 600 "$KUBE_CONFIG" /tmp/kubeconfig   # KUBE_CONFIG: file-type CI variable
+    - export KUBECONFIG=/tmp/kubeconfig
+    - helm upgrade --install "$RELEASE" "$CHART" --namespace "$NAMESPACE" --values "$VALUES_FILE"
+        --set image.repository="$CI_REGISTRY_IMAGE" --set image.tag="$CI_COMMIT_SHA"
+        --atomic --wait --timeout 10m

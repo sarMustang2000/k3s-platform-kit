@@ -1,0 +1,18 @@
+---
+# Only this role's vhosts are managed. Set true to remove nginx's default site (do not do that on a
+# host that serves other products from it).
+edge_proxy_remove_default_site: false
+
+# Where the ACME http-01 challenge files are written and served from. Using a
+# webroot keeps certbot out of the nginx configuration entirely.
+edge_proxy_acme_root: /var/www/certbot
+
+# The names this role serves (group_vars edge_sites); Grafana is appended when monitoring is on.
+edge_proxy_sites: >-
+  {{ edge_sites
+     + (edge_monitoring_sites if (monitoring_enabled | default(false) | bool) else []) }}
+
+# Login attempts per client IP (see platform-security.conf.j2); the burst lets a
+# person mistype a few times without waiting.
+edge_proxy_login_rate: 10r/m
+edge_proxy_login_burst: 5

@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "app.name" . }}
+  labels: {{- include "app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  strategy: {{- toYaml .Values.strategy | nindent 4 }}
+  selector:
+    matchLabels: {{- include "app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "app.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "app.podSpecCommon" . | nindent 6 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: app
+          image: {{ include "app.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.command }}
+          command: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.args }}
+          args: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- include "app.envFrom" . | nindent 10 }}
+          {{- if .Values.containerPort }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+          {{- with .Values.probes }}
+          startupProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            {{- toYaml .startup | nindent 12 }}
+          livenessProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            {{- toYaml .liveness | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: {{ .path }}, port: http}
+            {{- toYaml .readiness | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          {{- include "app.volumeMounts" . | nindent 10 }}
+      {{- include "app.volumes" . | nindent 6 }}

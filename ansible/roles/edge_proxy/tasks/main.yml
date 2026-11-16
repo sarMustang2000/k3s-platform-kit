@@ -1,0 +1,180 @@
+---
+# Optional TLS edge: nginx + Let's Encrypt in front of the cluster's nginx
+# (NodePort 30080), one vhost and one certificate per name.
+#
+# nginx configuration here is owned entirely by these templates. certbot only
+# ISSUES certificates (certonly --webroot); it never edits a vhost. The previous
+# arrangement - template the file, then let `certbot --nginx` add the TLS block
+# to it - meant every run dropped HTTPS and only restored it when the
+# certificate happened to be missing a name.
+
+- name: Install nginx and certbot
+  ansible.builtin.apt:
+    name: [nginx, certbot]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Webroot for ACME challenges
+  ansible.builtin.file:
+    path: "{{ edge_proxy_acme_root }}/.well-known/acme-challenge"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+
+- name: Firewall - HTTP/HTTPS from anywhere
+  community.general.ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: ["80", "443"]
+
+- name: Remove the default site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  when: edge_proxy_remove_default_site | bool
+  notify: Reload nginx
+
+# This host's nginx.conf includes only sites-enabled/*, not conf.d. The file is
+# named to sort before every vhost of this role, because nginx must have parsed
+# the map variables before a vhost uses them.
+- name: Security settings (server_tokens, login rate limit, header maps)
+  ansible.builtin.template:
+    src: platform-security.conf.j2
+    dest: /etc/nginx/sites-available/platform-00-security.conf
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable the security settings
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/platform-00-security.conf
+    dest: /etc/nginx/sites-enabled/platform-00-security.conf
+    state: link
+    force: true
+  notify: Reload nginx
+
+# Ubuntu's stock nginx.conf still lists TLSv1 and TLSv1.1. Each vhost overrides it
+# through options-ssl-nginx.conf, but a server block without that include would
+# fall back to the old protocols.
+- name: No TLS 1.0/1.1 as the http-level default
+  ansible.builtin.lineinfile:
+    path: /etc/nginx/nginx.conf
+    regexp: '^\s*ssl_protocols\s'
+    line: "\tssl_protocols TLSv1.2 TLSv1.3;"
+  notify: Reload nginx
+
+- name: Shared upstream
+  ansible.builtin.template:
+    src: platform-upstreams.conf.j2
+    dest: /etc/nginx/sites-available/platform-upstreams.conf
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable the shared upstream
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/platform-upstreams.conf
+    dest: /etc/nginx/sites-enabled/platform-upstreams.conf
+    state: link
+  notify: Reload nginx
+
+- name: Which certificates already exist
+  ansible.builtin.stat:
+    path: "/etc/letsencrypt/live/{{ item.name }}/fullchain.pem"
+  loop: "{{ edge_proxy_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: edge_proxy_cert_stat
+
+# A vhost may only reference a certificate that exists, or nginx refuses to
+# start. So the first pass writes HTTP-only vhosts, certbot issues, and the
+# second pass adds the TLS blocks.
+- name: Certificates present so far
+  ansible.builtin.set_fact:
+    edge_proxy_certs_present: >-
+      {{ edge_proxy_cert_stat.results | selectattr('stat.exists') | map(attribute='item.name') | list }}
+
+- name: Per-name vhosts (pass 1)
+  ansible.builtin.template:
+    src: platform-site.conf.j2
+    dest: "/etc/nginx/sites-available/platform-{{ site.name }}.conf"
+    mode: "0644"
+  loop: "{{ edge_proxy_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}"
+  notify: Reload nginx
+
+- name: Enable the per-name vhosts
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/platform-{{ site.name }}.conf"
+    dest: "/etc/nginx/sites-enabled/platform-{{ site.name }}.conf"
+    state: link
+  loop: "{{ edge_proxy_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}"
+  notify: Reload nginx
+
+- name: Apply nginx config so the ACME webroot is reachable
+  ansible.builtin.meta: flush_handlers
+
+- name: Obtain the certificates that are missing
+  ansible.builtin.command:
+    argv:
+      - certbot
+      - certonly
+      - --webroot
+      - --webroot-path={{ edge_proxy_acme_root }}
+      - --non-interactive
+      - --agree-tos
+      - --keep-until-expiring
+      - --email={{ edge_letsencrypt_email }}
+      - --cert-name={{ site.name }}
+      - -d
+      - "{{ site.name }}"
+  loop: "{{ edge_proxy_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}"
+  when: site.name not in edge_proxy_certs_present
+  register: edge_proxy_issue
+  changed_when: "'Successfully received certificate' in (edge_proxy_issue.stdout | default(''))"
+
+- name: Re-check which certificates exist
+  ansible.builtin.stat:
+    path: "/etc/letsencrypt/live/{{ item.name }}/fullchain.pem"
+  loop: "{{ edge_proxy_sites }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: edge_proxy_cert_stat2
+
+- name: Certificates present now
+  ansible.builtin.set_fact:
+    edge_proxy_certs_present: >-
+      {{ edge_proxy_cert_stat2.results | selectattr('stat.exists') | map(attribute='item.name') | list }}
+
+- name: Per-name vhosts (pass 2 - adds TLS for newly issued certificates)
+  ansible.builtin.template:
+    src: platform-site.conf.j2
+    dest: "/etc/nginx/sites-available/platform-{{ site.name }}.conf"
+    mode: "0644"
+  loop: "{{ edge_proxy_sites }}"
+  loop_control:
+    loop_var: site
+    label: "{{ site.name }}"
+  notify: Reload nginx
+
+- name: Warn about names without a certificate
+  ansible.builtin.debug:
+    msg: >-
+      No certificate for {{ item }} - it is served over HTTP only. Usually the
+      name does not resolve to this host yet, or port 80 is not reachable.
+  loop: "{{ edge_proxy_sites | map(attribute='name') | difference(edge_proxy_certs_present) }}"
+
+- name: Certificate auto-renewal timer
+  ansible.builtin.service:
+    name: certbot.timer
+    state: started
+    enabled: true

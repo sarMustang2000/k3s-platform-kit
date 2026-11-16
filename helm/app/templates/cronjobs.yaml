@@ -1,0 +1,37 @@
+{{- range $job := .Values.cronJobs }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-%s" (include "app.name" $) $job.name | trunc 52 | trimSuffix "-" }}
+  labels: {{- include "app.labels" $ | nindent 4 }}
+spec:
+  schedule: {{ $job.schedule | quote }}
+  suspend: {{ $job.suspend | default false }}
+  concurrencyPolicy: {{ $job.concurrencyPolicy | default "Forbid" }}
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ $job.backoffLimit | default 2 }}
+      {{- with $job.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            {{- include "app.selectorLabels" $ | nindent 12 }}
+            app.kubernetes.io/component: {{ $job.name }}
+        spec:
+          {{- include "app.podSpecCommon" $ | nindent 10 }}
+          restartPolicy: OnFailure
+          containers:
+            - name: {{ $job.name }}
+              image: {{ include "app.image" $ }}
+              command: {{- toYaml $job.command | nindent 16 }}
+              securityContext: {{- toYaml $.Values.securityContext | nindent 16 }}
+              {{- include "app.envFrom" $ | nindent 14 }}
+              resources: {{- toYaml ($job.resources | default $.Values.resources) | nindent 16 }}
+              {{- include "app.volumeMounts" $ | nindent 14 }}
+          {{- include "app.volumes" $ | nindent 10 }}
+{{- end }}

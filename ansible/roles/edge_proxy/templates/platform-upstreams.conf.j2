@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Declared once. Per-vhost files cannot each define it: duplicate upstream names
+# are a config error.
+upstream platform_cluster {
+    server {{ k3s_node_ip }}:30080;
+    keepalive 64;
+}

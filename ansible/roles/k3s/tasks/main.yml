@@ -1,0 +1,157 @@
+---
+# Single-node k3s server (Traefik disabled by default: nginx on NodePort 30080 is the entry point).
+# An already-installed k3s is never upgraded or reconfigured unless k3s_allow_upgrade=true.
+- name: HostPath directories used by the Helm values
+  ansible.builtin.file:
+    path: "{{ k3s_hostpath_root }}/{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.owner | default('root') }}"
+    mode: "0755"
+  loop: "{{ k3s_hostpaths }}"
+
+# Separate from admin_cidrs: SSH may need to stay reachable from changing home IPs, the API should not.
+- name: Firewall - Kubernetes API from the admin VPN and CI runners
+  community.general.ufw:
+    rule: allow
+    port: "6443"
+    proto: tcp
+    from_ip: "{{ item }}"
+  loop: "{{ (k8s_api_cidrs + k3s_runner_ips) | unique }}"
+
+# UFW only ever adds rules, so the old open-to-the-world rule must be deleted explicitly.
+- name: Firewall - drop the public Kubernetes API rule
+  community.general.ufw:
+    rule: allow
+    port: "6443"
+    proto: tcp
+    from_ip: "{{ item }}"
+    delete: true
+  loop: "{{ ['0.0.0.0/0', '::/0', 'any'] | difference(k8s_api_cidrs) }}"
+
+- name: Firewall - public entry point (nginx NodePort) from the edge
+  community.general.ufw:
+    rule: allow
+    port: "30080"
+    proto: tcp
+    from_ip: "{{ item }}"
+  loop: "{{ edge_cidrs }}"
+
+- name: Firewall - pod and service networks
+  community.general.ufw:
+    rule: allow
+    from_ip: "{{ item }}"
+  loop: [10.42.0.0/16, 10.43.0.0/16]
+
+- name: Firewall - allow routed traffic (NodePort -> pod forwarding)
+  community.general.ufw:
+    direction: routed
+    default: allow
+
+- name: Read installed k3s version
+  ansible.builtin.command: k3s --version
+  register: k3s_installed
+  changed_when: false
+  failed_when: false
+
+- name: Work out what to do with k3s
+  ansible.builtin.set_fact:
+    k3s_current: "{{ (k3s_installed.stdout | default('') | regex_search('v[0-9]+\\.[0-9]+\\.[0-9]+\\+k3s[0-9]+')) or '' }}"
+
+- name: Decide install / upgrade / keep
+  ansible.builtin.set_fact:
+    k3s_action: >-
+      {{ 'install' if not k3s_current
+         else 'keep' if k3s_current == k3s_version
+         else 'upgrade' if k3s_allow_upgrade | bool
+         else 'skip' }}
+    k3s_minor_current: "{{ (k3s_current | regex_replace('^v([0-9]+)\\.([0-9]+).*$', '\\1.\\2')) if k3s_current else '' }}"
+    k3s_minor_target: "{{ k3s_version | regex_replace('^v([0-9]+)\\.([0-9]+).*$', '\\1.\\2') }}"
+
+- name: Existing cluster left untouched
+  ansible.builtin.debug:
+    msg: >-
+      k3s {{ k3s_current }} is installed; target is {{ k3s_version }}. Not upgrading an existing cluster
+      automatically. To upgrade (one minor version at a time), set k3s_version to the next minor release
+      and run with -e k3s_allow_upgrade=true.
+  when: k3s_action == 'skip'
+
+- name: Upgrades must go one minor version at a time
+  ansible.builtin.assert:
+    that: >-
+      (k3s_minor_target.split('.')[1] | int) - (k3s_minor_current.split('.')[1] | int) in [0, 1]
+      and k3s_minor_target.split('.')[0] == k3s_minor_current.split('.')[0]
+    fail_msg: >-
+      {% if (k3s_minor_target.split('.')[1] | int) < (k3s_minor_current.split('.')[1] | int) %}
+      k3s {{ k3s_current }} -> {{ k3s_version }} is a downgrade, which k3s does not support; keep k3s_version >= {{ k3s_current }}.
+      {% else %}
+      k3s {{ k3s_current }} -> {{ k3s_version }} skips minor versions, which k3s does not support.
+      Upgrade through each minor release (set k3s_version to the latest v1.{{ (k3s_minor_current.split('.')[1] | int) + 1 }}.x+k3sN first).
+      {% endif %}
+    quiet: true
+  when: k3s_action == 'upgrade'
+
+- name: Check whether Traefik is in use on the existing cluster
+  ansible.builtin.command: k3s kubectl -n kube-system get deployment traefik -o name
+  register: k3s_traefik
+  changed_when: false
+  failed_when: false
+  when: k3s_action == 'upgrade'
+
+- name: Do not remove a running Traefik
+  ansible.builtin.assert:
+    that: "'traefik' not in k3s_disable_components or k3s_traefik.rc != 0"
+    fail_msg: >-
+      Traefik is running on this cluster and the upgrade would disable it. If your ingress relies on it,
+      set k3s_disable_components: [] (group_vars) and re-run.
+    quiet: true
+  when: k3s_action == 'upgrade'
+
+- name: Download k3s installer
+  ansible.builtin.get_url:
+    url: https://get.k3s.io
+    dest: /usr/local/bin/k3s-install.sh
+    mode: "0755"
+  when: k3s_action in ['install', 'upgrade']
+
+- name: Install / upgrade k3s {{ k3s_version }}
+  ansible.builtin.command: /usr/local/bin/k3s-install.sh
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_EXEC: >-
+      server
+      {% for component in k3s_disable_components %}--disable {{ component }} {% endfor %}
+      --write-kubeconfig-mode 600
+      --node-ip {{ private_ip | default(ansible_host) }}
+      --tls-san {{ ansible_host }}
+      --tls-san {{ private_ip | default(ansible_host) }}
+      {{ k3s_extra_server_args }}
+  changed_when: true
+  when: k3s_action in ['install', 'upgrade']
+
+- name: Wait for the node to be Ready
+  ansible.builtin.command: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  changed_when: false
+
+- name: Read admin kubeconfig
+  ansible.builtin.slurp:
+    src: /etc/rancher/k3s/k3s.yaml
+  register: k3s_kubeconfig
+
+# With the admin VPN the API is only reachable at the VPN gateway address. That
+# address is not in the API certificate, so the client checks the certificate
+# against "kubernetes" (always a SAN) instead - no k3s restart for a new SAN.
+# regex_replace, not replace: the '\n' reaches the filter as a backslash and an
+# "n", and only the regex replacement turns that into a line break.
+- name: Save kubeconfig on the control machine
+  delegate_to: localhost
+  become: false
+  ansible.builtin.copy:
+    content: >-
+      {{ k3s_kubeconfig.content | b64decode
+         | regex_replace('    server: https://127\.0\.0\.1:6443',
+                   ('    server: https://' + admin_vpn_gateway + ':6443\n    tls-server-name: kubernetes')
+                   if (admin_vpn_enabled | default(false) | bool)
+                   else ('    server: https://' + ansible_host + ':6443')) }}
+    dest: "{{ k3s_kubeconfig_local }}"
+    mode: "0600"

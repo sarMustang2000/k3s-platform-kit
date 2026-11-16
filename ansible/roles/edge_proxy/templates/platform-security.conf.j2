@@ -1,0 +1,28 @@
+# {{ ansible_managed }}
+# http-level settings for the edge (included from sites-enabled, like the vhosts).
+# nginx may be shared with other products on the host, so everything here is
+# either harmless to them (server_tokens) or namespaced "platform_" and only used
+# by this role's vhosts.
+
+server_tokens off;
+
+# Login brute force: POSTs to admin/login endpoints are limited per client IP.
+# Covers the usual admin logins (Django /admin/login/, Strapi /admin/login) and
+# OAuth-style endpoints. Other requests have an empty key and are never counted.
+map "$request_method:$uri" $platform_login_limit_key {
+    default                                  "";
+    "~^POST:.*/login/?$"                     $binary_remote_addr;
+    "~^POST:/(auth/|api/oauth|oauth)"        $binary_remote_addr;
+}
+limit_req_zone $platform_login_limit_key zone=platform_login:10m rate={{ edge_proxy_login_rate }};
+
+# Add X-Frame-Options only when the application did not set its own (Next.js sends
+# DENY, Django admin SAMEORIGIN); an empty value makes add_header send nothing.
+map $upstream_http_x_frame_options $platform_x_frame_options {
+    ""      SAMEORIGIN;
+    default "";
+}
+map $upstream_http_x_content_type_options $platform_x_content_type_options {
+    ""      nosniff;
+    default "";
+}

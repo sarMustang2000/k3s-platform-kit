@@ -1,0 +1,115 @@
+# Every service on the platform deploys with this one chart and a small values
+# file of its own. Anything left at its default is safe for production.
+
+image:
+  repository: ghcr.io/example/api
+  tag: ""                       # CI sets this to the commit SHA; never "latest"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Overrides the image's entrypoint (e.g. a worker from the same image as the web app).
+command: []
+args: []
+
+replicaCount: 1
+strategy:
+  type: RollingUpdate
+  rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+revisionHistoryLimit: 3
+terminationGracePeriodSeconds: 30
+
+# --- Configuration -------------------------------------------------------------
+# Plain settings -> ConfigMap. A change rolls the pods (checksum annotation).
+env: {}
+# Existing Secrets loaded as environment variables, created outside the chart
+# (ansible, sealed-secrets, external-secrets ...). Values never live in git.
+envFromSecrets: []
+
+# --- Networking ----------------------------------------------------------------
+# containerPort 0 = no Service, no probes on a port (a worker).
+containerPort: 8000
+service:
+  type: ClusterIP
+  port: 80
+  nodePort: null                # only with type NodePort
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts: []                     # [{host: api.example.com, paths: [/]}]
+  tls: []
+# Only pods in the same namespace and the ingress controller's namespace may
+# connect; set enabled: false to allow everything.
+networkPolicy:
+  enabled: true
+  ingressNamespaces: [ingress-nginx, nginx]
+
+# --- Health --------------------------------------------------------------------
+# startupProbe guards slow boots (migrations, cache warm-up) from the liveness probe.
+probes:
+  path: /healthz
+  startup: {failureThreshold: 30, periodSeconds: 5}
+  liveness: {periodSeconds: 10, failureThreshold: 3}
+  readiness: {periodSeconds: 5, failureThreshold: 2}
+
+# --- Resources and scaling -----------------------------------------------------
+resources:
+  requests: {cpu: 50m, memory: 128Mi}
+  limits: {memory: 512Mi}       # no CPU limit: throttling hurts latency more than it protects neighbours
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 75
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# --- Security ------------------------------------------------------------------
+serviceAccount:
+  create: true
+  automount: false              # most apps never call the Kubernetes API
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile: {type: RuntimeDefault}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: [ALL]}
+# Writable scratch space, since the root filesystem is read-only.
+tmpDir: true
+
+# --- Storage -------------------------------------------------------------------
+persistence:
+  enabled: false
+  mountPath: /data
+  size: 5Gi
+  storageClass: local-path
+  accessModes: [ReadWriteOnce]
+extraVolumes: []
+extraVolumeMounts: []
+
+# --- One-off and scheduled jobs ------------------------------------------------
+# Runs before every install/upgrade and blocks the rollout if it fails, so a
+# release whose migration breaks never starts serving.
+migration:
+  enabled: false
+  command: []                   # e.g. [python, manage.py, migrate, --noinput]
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+
+# Scheduled jobs from the same image and configuration.
+cronJobs: []
+# - name: cleanup
+#   schedule: "0 3 * * *"
+#   command: [python, manage.py, cleanup]
+#   concurrencyPolicy: Forbid   # never overlap with a slow previous run
+#   activeDeadlineSeconds: 3600
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}

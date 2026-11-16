@@ -1,0 +1,9 @@
+---
+backups_dir: /var/backups/platform
+backups_hour: 3
+backups_retention_days: 14
+# e.g. "backup@backup-host:/srv/backups/platform/" (needs SSH key access from the server); empty = local only
+backups_rsync_target: ""
+backups_mysql_databases: "{{ platform_databases }}"
+# Directories on the k3s node archived nightly (user uploads on hostPath volumes).
+backups_paths: []

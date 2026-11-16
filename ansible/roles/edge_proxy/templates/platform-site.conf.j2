@@ -1,0 +1,95 @@
+# {{ ansible_managed }}
+# One vhost and one certificate per name.
+#
+# The TLS block is written by this template, not by `certbot --nginx`. Letting
+# certbot edit a templated file is what broke this host: the template rewrote
+# the file on every run, dropping certbot's "listen 443", and certbot only
+# re-added it when the certificate was missing a name - so HTTPS silently
+# disappeared and every domain fell through to a redirect loop.
+{% macro body(site) %}
+{% if site.kind == 'redirect' %}
+    location / {
+        return 301 {{ site.target }}$request_uri;
+    }
+{% elif site.kind == 'proxy' %}
+    location / {
+        proxy_pass {{ site.target }};
+{% if site.target.startswith('https://') %}
+        # The backend presents its own certificate for a name that is not this
+        # one, so verification here would always fail. The hop is over loopback.
+        proxy_ssl_verify off;
+{% endif %}
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout {{ site.read_timeout | default('60s') }};
+    }
+{% else %}
+    location / {
+        proxy_pass http://platform_cluster;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # The cluster nginx passes this on; Django uses it for secure cookies / CSRF.
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+{% endif %}
+{% endmacro %}
+{% set has_cert = site.name in edge_proxy_certs_present %}
+server {
+    listen 80;
+    server_name {{ site.name }};
+    client_max_body_size {{ site.max_body | default('20m') }};
+
+    # Served from disk so certbot renews with --webroot and never has to touch
+    # this configuration.
+    location ^~ /.well-known/acme-challenge/ {
+        root {{ edge_proxy_acme_root }};
+    }
+{% if has_cert %}
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+{% else %}
+    # No certificate yet, so the site is served over plain HTTP rather than
+    # redirected to an HTTPS vhost that does not exist. Degraded, not broken.
+{{ body(site) }}
+{% endif %}
+}
+{% if has_cert %}
+
+server {
+    # No "http2" parameter here. It is a property of the listening socket, not
+    # of the vhost, so repeating it across per-name vhosts makes nginx warn
+    # "protocol options redefined for 0.0.0.0:443" on every reload - and
+    # "http2 on;" is not an option either on nginx before 1.25.1, where that
+    # directive does not exist. If HTTP/2 is wanted, enable it once
+    # for the socket rather than per vhost.
+    listen 443 ssl;
+    server_name {{ site.name }};
+
+    ssl_certificate     /etc/letsencrypt/live/{{ site.name }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ site.name }}/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    client_max_body_size {{ site.max_body | default('20m') }};
+
+    # Headers for every response; see platform-security.conf for the maps.
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Frame-Options $platform_x_frame_options always;
+    add_header X-Content-Type-Options $platform_x_content_type_options always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    limit_req zone=platform_login burst={{ edge_proxy_login_burst }} nodelay;
+    limit_req_status 429;
+{{ body(site) }}
+}
+{% endif %}

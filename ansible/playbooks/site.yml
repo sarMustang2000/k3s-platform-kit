@@ -1,0 +1,41 @@
+---
+# Everything, in dependency order. Each play is also runnable alone with --tags.
+- name: Baseline for every server
+  hosts: all
+  roles:
+    - {role: common, tags: [common]}
+
+- name: Database
+  hosts: mysql
+  roles:
+    - {role: mysql, tags: [mysql]}
+
+- name: Kubernetes node
+  hosts: k3s_server
+  roles:
+    - {role: k3s, tags: [k3s]}
+
+- name: CI runner hosts and anything that builds images
+  hosts: ci_runner
+  roles:
+    - {role: docker, tags: [docker]}
+
+- name: TLS edge
+  hosts: edge
+  roles:
+    - {role: edge_proxy, tags: [edge]}
+
+- name: Nightly backups
+  hosts: "mysql:k3s_server"
+  roles:
+    - {role: backups, tags: [backups]}
+
+- name: Monitoring (helm from the control machine)
+  hosts: localhost
+  connection: local
+  become: false
+  gather_facts: false
+  environment:
+    KUBECONFIG: "{{ k3s_kubeconfig_local }}"
+  roles:
+    - {role: monitoring, tags: [monitoring], when: monitoring_enabled | bool}

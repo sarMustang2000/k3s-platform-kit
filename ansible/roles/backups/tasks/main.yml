@@ -1,0 +1,20 @@
+---
+# Nightly backups: MySQL dumps on the database host, upload directories on the k3s node.
+- name: Backup directory
+  ansible.builtin.file:
+    path: "{{ backups_dir }}"
+    state: directory
+    mode: "0700"
+
+- name: Backup script
+  ansible.builtin.template:
+    src: platform-backup.sh.j2
+    dest: /usr/local/bin/platform-backup.sh
+    mode: "0750"
+
+- name: Nightly backup cron job
+  ansible.builtin.cron:
+    name: platform-backup
+    hour: "{{ backups_hour }}"
+    minute: "{{ 30 if 'k3s_server' in group_names else 0 }}"
+    job: /usr/local/bin/platform-backup.sh >> /var/log/platform-backup.log 2>&1

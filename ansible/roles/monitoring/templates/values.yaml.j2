@@ -1,0 +1,98 @@
+# {{ ansible_managed }}
+# Values for victoria-metrics-k8s-stack {{ monitoring_chart_version }}. Written
+# 0600 to a temp file and deleted after the deploy: it carries the Grafana admin
+# password and the Telegram bot token.
+
+fullnameOverride: vm
+
+# --- k3s -----------------------------------------------------------------------
+# The controller manager, scheduler and datastore run inside the k3s-server
+# process and listen on 127.0.0.1 only; there is no etcd at all (SQLite/kine).
+# Scraping them would only produce "target down" alerts forever. Their default
+# alert rules follow these switches.
+kubeControllerManager: {enabled: false}
+kubeScheduler: {enabled: false}
+kubeEtcd: {enabled: false}
+
+# --- Metrics -------------------------------------------------------------------
+vmsingle:
+  spec:
+    retentionPeriod: "{{ monitoring_metrics_retention }}"
+    storage:
+      resources:
+        requests:
+          storage: {{ monitoring_metrics_storage }}
+
+# --- Logs ----------------------------------------------------------------------
+# vlagent tails every pod's log on the node (all namespaces, every tenant) and
+# ships it to VictoriaLogs.
+vlsingle:
+  enabled: true
+  spec:
+    retentionPeriod: "{{ monitoring_logs_retention }}"
+    extraArgs:
+      retention.maxDiskSpaceUsageBytes: "{{ monitoring_logs_max_disk }}"
+    storage:
+      resources:
+        requests:
+          storage: {{ monitoring_logs_storage }}
+vlagent:
+  enabled: true
+  rbac:
+    # Pods in every namespace, not just this one.
+    namespaced: false
+
+# --- Grafana -------------------------------------------------------------------
+grafana:
+  adminUser: admin
+  adminPassword: {{ vault_grafana_admin_password | to_json }}
+  service:
+    type: NodePort
+    nodePort: {{ monitoring_grafana_nodeport }}
+  persistence:
+    enabled: true
+    size: 1Gi
+  # The VictoriaLogs datasource is a plugin; without it the logs datasource the
+  # chart provisions is unusable.
+  plugins:
+    - victoriametrics-logs-datasource
+    - victoriametrics-metrics-datasource
+  grafana.ini:
+    server:
+      root_url: "https://{{ monitoring_hostname }}"
+    auth.anonymous:
+      enabled: false
+    users:
+      allow_sign_up: false
+
+# --- Alerting ------------------------------------------------------------------
+# Every receiver hangs off one route tree, so adding an SMS/call provider later
+# is one more receiver plus a route for severity=critical.
+alertmanager:
+  config:
+    route:
+      receiver: {{ 'telegram' if monitoring_telegram_enabled | bool else 'blackhole' }}
+      group_by: [alertname, namespace]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        # Always-firing heartbeat used to prove the pipeline works; not news.
+        - matchers: ['alertname=~"Watchdog|InfoInhibitor"']
+          receiver: blackhole
+    inhibit_rules:
+      - source_matchers: [severity="critical"]
+        target_matchers: ['severity=~"warning|info"']
+        equal: [namespace, alertname]
+      - source_matchers: [severity="warning"]
+        target_matchers: [severity="info"]
+        equal: [namespace, alertname]
+    receivers:
+      - name: blackhole
+{% if monitoring_telegram_enabled | bool %}
+      - name: telegram
+        telegram_configs:
+          - bot_token: {{ vault_alert_telegram_bot_token | to_json }}
+            chat_id: {{ vault_alert_telegram_chat_id | int }}
+            send_resolved: true
+{% endif %}

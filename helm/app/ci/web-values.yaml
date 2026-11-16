@@ -1,0 +1,13 @@
+image: {repository: ghcr.io/example/api, tag: 3f2a1c9}
+env: {DJANGO_SETTINGS_MODULE: config.settings, LOG_LEVEL: info}
+envFromSecrets: [api-secrets]
+ingress:
+  enabled: true
+  hosts: [{host: api.example.com, paths: [/]}]
+  tls: [{hosts: [api.example.com], secretName: api-tls}]
+autoscaling: {enabled: true}
+podDisruptionBudget: {enabled: true}
+persistence: {enabled: true, mountPath: /app/media}
+migration: {enabled: true, command: [python, manage.py, migrate, --noinput]}
+cronJobs:
+  - {name: cleanup, schedule: "0 3 * * *", command: [python, manage.py, cleanup], activeDeadlineSeconds: 3600}

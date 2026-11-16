@@ -1,0 +1,18 @@
+# cp hosts.example.yml hosts.yml. One machine may appear in several groups:
+# the smallest setup is a single VM in every group.
+all:
+  children:
+    k3s_server:
+      hosts:
+        node1: {ansible_host: 203.0.113.10, private_ip: 10.0.0.10}
+    mysql:
+      hosts:
+        node1: {}
+    edge:
+      hosts:
+        node1: {}
+    ci_runner:
+      hosts: {}
+  vars:
+    ansible_user: ubuntu
+    ansible_become: true

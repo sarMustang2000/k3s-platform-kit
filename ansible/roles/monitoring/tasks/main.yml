@@ -1,0 +1,96 @@
+---
+# Deploys the monitoring stack from the control machine with the helm CLI:
+# `helm upgrade --install` is idempotent by itself and reports honestly
+# whether anything changed.
+
+- name: Monitoring - deploy the chart
+  block:
+    - name: Monitoring - temporary values file
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .yaml
+      register: monitoring_values_tmp
+      changed_when: false
+
+    # 0600 and removed afterwards: it holds the Grafana password and the
+    # Telegram bot token, which must not sit on disk or on a command line.
+    - name: Monitoring - write the release values
+      ansible.builtin.template:
+        src: values.yaml.j2
+        dest: "{{ monitoring_values_tmp.path }}"
+        mode: "0600"
+      no_log: true
+      changed_when: false
+
+    - name: Monitoring - helm upgrade --install
+      ansible.builtin.command:
+        argv:
+          - helm
+          - upgrade
+          - --install
+          - "{{ monitoring_release }}"
+          - victoria-metrics-k8s-stack
+          - --repo={{ monitoring_chart_repo }}
+          - --version={{ monitoring_chart_version }}
+          - --namespace={{ monitoring_namespace }}
+          - --create-namespace
+          - --values={{ monitoring_values_tmp.path }}
+          # The operator reconciles the VM* resources after helm returns; the
+          # rollout checks below wait for the workloads that matter.
+          - --wait
+          - --timeout=15m
+      register: monitoring_deploy
+      changed_when: >-
+        'has been upgraded' in (monitoring_deploy.stdout | default(''))
+        or 'has been installed' in (monitoring_deploy.stdout | default(''))
+
+  always:
+    - name: Monitoring - remove the values file
+      ansible.builtin.file:
+        path: "{{ monitoring_values_tmp.path }}"
+        state: absent
+      when: monitoring_values_tmp.path is defined
+      changed_when: false
+
+# The storage, logging and alerting components are created by the operator
+# from the chart's custom resources, so helm --wait does not cover them.
+- name: Monitoring - wait for the operator-managed workloads
+  ansible.builtin.command:
+    # Not `rollout status`: the operator creates Alertmanager's StatefulSet with
+    # the OnDelete strategy, which rollout status refuses to report on.
+    argv:
+      - kubectl
+      - --namespace={{ monitoring_namespace }}
+      - wait
+      - "{{ item }}"
+      - --for=jsonpath={.status.readyReplicas}=1
+      - --timeout=10m
+  loop:
+    - deployment/vmsingle-vm
+    - deployment/vmagent-vm
+    - deployment/vmalert-vm
+    - statefulset/vmalertmanager-vm
+    - deployment/vlsingle-vm
+  register: monitoring_rollout
+  retries: 12
+  delay: 10
+  # The operator may not have created an object yet on the first pass.
+  until: monitoring_rollout.rc == 0
+  changed_when: false
+
+- name: Monitoring - Grafana answers on its NodePort
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ monitoring_grafana_nodeport }}/api/health"
+  register: monitoring_grafana_health
+  until: monitoring_grafana_health.status == 200
+  retries: 30
+  delay: 10
+  delegate_to: "{{ groups['k3s_server'][0] }}"
+
+- name: Monitoring - where to look
+  ansible.builtin.debug:
+    msg:
+      - "Grafana: https://{{ monitoring_hostname }} (user admin, password vault_grafana_admin_password)"
+      - >-
+        Alerts: {{ ('Telegram chat ' ~ vault_alert_telegram_chat_id) if monitoring_telegram_enabled | bool
+                   else 'NOT SENT - set vault_alert_telegram_bot_token/chat_id' }}

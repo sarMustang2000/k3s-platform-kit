@@ -1,0 +1,62 @@
+# Non-secret settings. Secrets live in vault.yml (ansible-vault encrypted, see vault.example.yml).
+---
+platform_domain: example.com
+platform_timezone: UTC
+
+# --- Addresses (derived from the inventory) ------------------------------------------------------
+k3s_node_ip: "{{ hostvars[groups['k3s_server'][0]]['private_ip'] | default(hostvars[groups['k3s_server'][0]]['ansible_host']) }}"
+mysql_host_ip: "{{ hostvars[groups['mysql'][0]]['private_ip'] | default(hostvars[groups['mysql'][0]]['ansible_host']) }}"
+
+# --- Firewall --------------------------------------------------------------------------------------
+# Networks allowed to reach SSH. Tighten this to your office / VPN ranges.
+admin_cidrs:
+  - 0.0.0.0/0
+# Kubernetes API (6443): never public. Admin networks plus the Docker bridge
+# range that CI job containers on an on-box runner come from.
+k8s_api_cidrs:
+  - 198.51.100.0/24
+  - 172.16.0.0/12
+# Who may reach NodePort 30080 (the CDN / edge ranges). kube-proxy forwards
+# NodePort traffic before UFW's input rules, so this is best effort: restrict
+# the entry point with the cloud provider's firewall as well.
+edge_cidrs:
+  - 0.0.0.0/0
+# Set true if API access goes through an admin VPN whose gateway is admin_vpn_gateway.
+admin_vpn_enabled: false
+admin_vpn_gateway: 10.99.0.1     # example
+
+# --- Kubernetes ------------------------------------------------------------------------------------
+k3s_version: v1.33.5+k3s1
+k3s_kubeconfig_local: "{{ playbook_dir }}/../.generated/kubeconfig"
+k3s_hostpath_root: /srv/platform
+k3s_hostpaths:
+  - {path: api/media}
+  - {path: web/uploads, owner: "1000"}
+
+# --- Databases -------------------------------------------------------------------------------------
+# One database and user per app and environment; passwords in vault_mysql_passwords.
+platform_databases: [api, api_staging]
+mysql_innodb_buffer_pool_size: 1G     # ~50-70% of the DB server's RAM
+mysql_max_connections: 300
+
+# --- Edge ------------------------------------------------------------------------------------------
+edge_letsencrypt_email: ops@example.com
+# kind: cluster (to NodePort 30080, the default) | proxy (to target) | redirect (to target)
+edge_sites:
+  - {name: "app.{{ platform_domain }}", kind: cluster}
+  - {name: "api.{{ platform_domain }}", kind: cluster, max_body: 50m}
+  - {name: "www.{{ platform_domain }}", kind: redirect, target: "https://app.{{ platform_domain }}"}
+edge_monitoring_sites:
+  - {name: "{{ monitoring_hostname }}", kind: proxy, target: "http://127.0.0.1:{{ monitoring_grafana_nodeport }}"}
+
+# --- Backups ---------------------------------------------------------------------------------------
+backups_paths:
+  - "{{ k3s_hostpath_root }}/api/media"
+  - "{{ k3s_hostpath_root }}/web/uploads"
+
+# --- Monitoring ------------------------------------------------------------------------------------
+monitoring_enabled: true
+monitoring_hostname: "grafana.{{ platform_domain }}"
+monitoring_telegram_enabled: >-
+  {{ (vault_alert_telegram_bot_token | default('') | length > 0)
+     and (vault_alert_telegram_chat_id | default('') | string | length > 0) }}

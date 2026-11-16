@@ -1,0 +1,46 @@
+receivers:
+  otlp:
+    protocols:
+      grpc: {endpoint: 0.0.0.0:4317}
+      http: {endpoint: 0.0.0.0:4318}
+
+processors:
+  # Refuse data before the collector runs out of memory, rather than crash.
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+  batch: {}
+  # Tag everything with where it ran, so one Grafana can tell environments apart.
+  resource:
+    attributes:
+      - {key: deployment.environment, value: local, action: upsert}
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls: {insecure: true}
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion: {enabled: true}
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+extensions:
+  health_check: {}
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlphttp/loki]

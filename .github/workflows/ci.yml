@@ -1,0 +1,36 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  ansible:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: ansible}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install ansible-core==2.18.1 ansible-lint==24.12.2
+      - run: ansible-galaxy collection install -r requirements.yml -p .collections
+      - run: |
+          cp inventory/hosts.example.yml inventory/hosts.yml
+          cp inventory/group_vars/all/vault.example.yml inventory/group_vars/all/vault.yml
+          ansible-playbook playbooks/site.yml --syntax-check
+      - run: ansible-lint playbooks/site.yml
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: |
+          for v in helm/app/ci/*.yaml; do helm lint helm/app --strict -f "$v"; done
+          helm template api helm/app -f helm/app/ci/web-values.yaml > rendered.yaml
+      - name: validate against Kubernetes schemas
+        run: docker run --rm -v "$PWD:/w" ghcr.io/yannh/kubeconform:v0.6.7 -strict -summary /w/rendered.yaml
+
+  compose-and-ci-templates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f observability/docker-compose.yml config -q
+      - run: bash -n k8s/make-ci-kubeconfig.sh

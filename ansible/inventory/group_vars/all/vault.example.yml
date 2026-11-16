@@ -1,0 +1,9 @@
+# cp vault.example.yml vault.yml, fill in, then: ansible-vault encrypt vault.yml
+---
+vault_mysql_passwords:
+  api: CHANGE-ME
+  api_staging: CHANGE-ME
+vault_grafana_admin_password: CHANGE-ME
+# Optional: alerts to Telegram
+vault_alert_telegram_bot_token: ""
+vault_alert_telegram_chat_id: ""
